@@ -218,6 +218,7 @@ class Grid:
     @property
     def landsea_mask(self) -> np.array:
         if self.grid_config.landsea_mask is not None:
+            # return np.zeros((self.x, self.y)) # use when loading the old weights
             return self.grid_config.landsea_mask[
                 self.subdomain[0] : self.subdomain[1],
                 self.subdomain[2] : self.subdomain[3],

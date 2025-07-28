@@ -1,11 +1,12 @@
 # lightning.pytorch==2.4.0
 seed_everything: true
 
-ckpt_path: #EMPTY: runs as usual. NOT EMPTY: load weights and hyperparameters from checkpoint
+# ckpt_path: "logs_experiment/titan/last.ckpt" #EMPTY: runs as usual. NOT EMPTY: load weights and hyperparameters from checkpoint
+ckpt_path: "logs_experiment/titan_rain/epoch=29-val_mean_loss=3.24.ckpt" #EMPTY: runs as usual. NOT EMPTY: load weights and hyperparameters from checkpoint
 
 trainer:               # Native training arguments of ligthining.pytorch.Trainer
 
-  fast_dev_run: False  # True: fit with only 1 batch and 1 epoch, use for dev (logging & checkpointing disabled)
+  fast_dev_run: True  # True: fit with only 1 batch and 1 epoch, use for dev (logging & checkpointing disabled)
   num_nodes: 1         # Num of GPU nodes (1 if device=cpu)
   max_epochs: 500
   profiler: null       # Performance profiler. Possibilities are [null, simple, or specific custom class (see doc)]

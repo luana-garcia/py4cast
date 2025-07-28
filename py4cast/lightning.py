@@ -28,9 +28,10 @@ from py4cast.datasets.base import DatasetInfo, ItemBatch, NamedTensor, Statics
 from py4cast.io.outputs import (
     OutputSavingSettings,
     save_gifs,
+    save_gifs_anchors,
     save_named_tensors_to_grib,
 )
-from py4cast.losses import ScaledLoss, WeightedLoss
+from py4cast.losses import ScaledLoss, WeightedLoss, StandardLoss
 from py4cast.metrics import MetricACC, MetricPSDK, MetricPSDVar
 from py4cast.models import build_model_from_settings, get_model_kls_and_settings
 from py4cast.models import registry as model_registry
@@ -41,6 +42,10 @@ from py4cast.plots import (
     StateErrorPlot,
 )
 from py4cast.utils import str_to_dtype
+
+import matplotlib.pyplot as plt
+import numpy as np
+import scipy
 
 PLOT_PERIOD: int = 10
 
@@ -177,6 +182,7 @@ class AutoRegressiveLightning(LightningModule):
         min_learning_rate: float = 1e-6,
         num_warmup_steps: int = 0,
         betas: tuple = (0.9, 0.999),
+        explain_instance: Dict = None,
         *args,
         **kwargs,
     ):
@@ -202,6 +208,7 @@ class AutoRegressiveLightning(LightningModule):
         self.min_learning_rate = min_learning_rate
         self.num_warmup_steps = num_warmup_steps
         self.betas = betas
+        self.explain_instance = explain_instance
 
         if self.training_strategy == "downscaling_only":
             print(
@@ -307,6 +314,8 @@ class AutoRegressiveLightning(LightningModule):
             raise TypeError(f"Unknown loss function: {loss_name}")
         self.loss.prepare(self, statics.interior_mask, dataset_info)
 
+        self.loss_gradients = StandardLoss("L1Loss", reduction="none")
+
     #############################################################
     #                           SETUP                           #
     #############################################################
@@ -349,6 +358,13 @@ class AutoRegressiveLightning(LightningModule):
         self.output_feature_names = checkpoint["output_feature_names"]
         self.output_dim_names = checkpoint["output_dim_names"]
         self.output_dtype = checkpoint["output_dtype"]
+
+    @property
+    def explanation_mode_enabled(self) -> bool:
+        """
+        Check if explanation mode is enabled
+        """
+        return self.explain_instance.get("explanation_mode", False)
 
     @property
     def logging_enabled(self) -> bool:
@@ -572,6 +588,8 @@ class AutoRegressiveLightning(LightningModule):
                 # Here we adapt our tensors to the order of dimensions of CNNs and ViTs
                 if self.model.features_second:
                     x = features_last_to_second(x)
+                    if self.explanation_mode_enabled:
+                        x.requires_grad_(True)
                     y = self.model(x)
                     y = features_second_to_last(y)
                 else:
@@ -1084,8 +1102,8 @@ class AutoRegressiveLightning(LightningModule):
             new_key = k.replace("model.", "")
             new_state_dict[new_key] = v
         return new_state_dict
-
-    def predict_step(self, batch: ItemBatch, batch_idx: int) -> torch.Tensor:
+    
+    def verify_predict_inputs(self, batch: ItemBatch, batch_idx: int) -> torch.Tensor:
         """
         Check if the feature names are the same as the one used during training
         and make a prediction and accumulate if io_conf =/= none.
@@ -1099,27 +1117,18 @@ class AutoRegressiveLightning(LightningModule):
 
         if self.io_conf is None:
             return
-
-        # Save gribs if a io config file is given
-        with open(self.io_conf, "r") as f:
-            save_settings = OutputSavingSettings(**json.load(f))
-
-        grid = self.infer_ds.grid
+        
+        
         batch_size = batch.batch_size
 
         idx_samples = [batch_idx * batch_size + b for b in range(batch_size)]
         samples = [self.infer_ds.sample_list[idx] for idx in idx_samples]
-        runtimes = [
-            sample.timestamps.datetime.strftime("%Y%m%d%H") for sample in samples
-        ]
+        
 
         samples_accepted_in_batch = [
             sample.timestamps.datetime.hour in self.trainer.datamodule.list_run_hour
             for sample in samples
         ]
-
-        if not any(samples_accepted_in_batch):
-            return
 
         # If the weights are old, it could be not possible to use them as ckpt.
         # Weights should then be loaded with this argument.
@@ -1129,7 +1138,18 @@ class AutoRegressiveLightning(LightningModule):
             )
             self.model.load_state_dict(weights)
 
-        preds = self.forward(batch, batch_idx)
+        return samples, samples_accepted_in_batch
+
+    def format_predict_output(self, preds, samples, samples_accepted_in_batch, anchors = False):
+        # Save gribs if a io config file is given
+        with open(self.io_conf, "r") as f:
+            save_settings = OutputSavingSettings(**json.load(f))
+
+        grid = self.infer_ds.grid
+
+        runtimes = [
+            sample.timestamps.datetime.strftime("%Y%m%d%H") for sample in samples
+        ]
 
         # Unnormalize data
         for feature_name in preds.feature_names:
@@ -1148,11 +1168,243 @@ class AutoRegressiveLightning(LightningModule):
             # Write GIFS
             if self.trainer.datamodule.save_gifs:
                 print("Saving gifs...")
-                save_gifs(pred, runtime, grid, save_settings)
+                if self.explanation_mode_enabled:
+                    save_gifs_anchors(pred, runtime, grid, save_settings, anchors)
+                else:
+                    save_gifs(pred, runtime, grid, save_settings)
 
             if self.trainer.datamodule.save_gribs:
                 print("Writing gribs...")
                 save_named_tensors_to_grib(
                     pred, self.infer_ds, sample, save_settings, runtime
                 )
+    
+    
+                
+    def predict_step(self, batch: ItemBatch, batch_idx: int) -> torch.Tensor:
+        """
+        Check if the feature names are the same as the one used during training
+        and make a prediction and accumulate if io_conf =/= none.
+        """
+        samples, samples_accepted_in_batch = self.verify_predict_inputs(batch, batch_idx)
+
+        if not any(samples_accepted_in_batch):
+            return
+        
+        preds = self.forward(batch, batch_idx)
+
+        if self.explanation_mode_enabled:
+            if self.explain_instance['explanation_type'] == 'anchors':
+                num_perturbations = self.explain_instance["explanation_args"]["num_perturbations"]
+                show_perturbations = self.explain_instance["explanation_args"]["show_perturbations"]
+
+                input_anchors = self.explain_with_anchors(
+                    batch,
+                    batch_idx,
+                    preds,
+                    num_perturbations,
+                    show_perturbations)
+                self.format_predict_output(batch.inputs, samples, samples_accepted_in_batch, input_anchors)
+            else:
+                self.explain_with_grad(batch, batch_idx)
+        else:
+            self.format_predict_output(preds, samples, samples_accepted_in_batch)
+
+        return preds
+        
+    def explain_with_anchors(self, batch, batch_idx, output, nb_tests = 100, show_perturbations = False):
+        sigma_e = 20.
+        thresh_on_diff_pred_proba=0.1
+
+        original_input = batch.inputs.tensor.clone()
+
+        # observation extraction
+        NbChannels = original_input.shape[4]
+        ImSizeX = original_input.shape[2]
+        ImSizeY = original_input.shape[3]
+        
+        # prediction with a modified observation
+        found_i_hat=[]
+        found_j_hat=[]
+        found_c_hat=[]
+        found_diff_v_hat=[]
+        diff_pred=[]
+
+        point_map_x = self.explain_instance["explanation_args"]["point_map_x"]
+        point_map_y = self.explain_instance["explanation_args"]["point_map_y"]
+
+        radius = self.explain_instance["explanation_args"]["perturbation_radius"]
+
+        top_k_points = self.explain_instance["plot_args"]["top_k_points"]
+
+        data = original_input[0, 0].detach().cpu().numpy()
+        
+        for i in range(nb_tests):
+            angle = np.random.uniform(0, 2 * np.pi)
+            distance = np.random.uniform(0, radius)
+            
+            # Calcula novas coordenadas
+            x = int(point_map_x + distance * np.sin(angle))
+            y = int(point_map_y + distance * np.cos(angle))
+            
+            i_hat = max(0, min(x, ImSizeX - 1))
+            j_hat = max(0, min(y, ImSizeY - 1))
+
+            i_hat = ImSizeX - i_hat
+            j_hat = ImSizeY - j_hat
+
+            c_hat = np.random.randint(low=0,high=NbChannels)  # random channel
+
+            # TO DO: se basear no arquivo de outputs.py para pegar os parametros de METADATA
+            # random values
+            if c_hat == 0:  # Precipitation
+                v_hat = np.random.uniform(0, 60)  # 0 a 60 mm
+            elif c_hat in [1, 2]:  # Winds
+                v_hat = np.random.uniform(-20, 20)  # -20 a 20 m/s
+
+
+            pdf_x=scipy.stats.norm.pdf(np.arange(ImSizeX),loc=i_hat,scale=sigma_e)
+            pdf_y=scipy.stats.norm.pdf(np.arange(ImSizeY),loc=j_hat,scale=sigma_e)
+            mask=torch.tensor(np.outer(pdf_x, pdf_y)).type(torch.float)
+            mask/=mask.max()
+            mask = mask.to(batch.inputs.device)
+
+            perturbed_batch = deepcopy(batch)
+            observation_test = perturbed_batch.inputs.tensor
+            observation_test[0,0,:,:,c_hat]= v_hat*mask + (1-mask)*observation_test[0,0,:,:,c_hat]
+
+            perturbed_batch.inputs.tensor = observation_test
+
+            # visualize perturbed data
+            if show_perturbations:
+                data_perturbed = observation_test[0, 0].detach().cpu().numpy()
+                channel_names = ['Precipitation (tp_0m)', 'Wind U10 (aro_u10_10m)', 'Wind V10 (aro_v10_10m)']
+
+                self.plot_comparison(
+                    original=data,
+                    mask=mask,
+                    perturbed=data_perturbed,
+                    channel_names=channel_names,
+                    x_map=point_map_x,
+                    y_map=point_map_y,
+                    i_hat=i_hat,
+                    j_hat=j_hat,
+                    c_hat=c_hat
+                )
+            
+            output_test = self.forward(perturbed_batch, batch_idx)
+
+            diff = torch.abs(
+                    output_test.tensor[0,0,point_map_x,point_map_y,output_test.feature_names_to_idx['aro_tp_0m']] - output.tensor[0,0,point_map_x,point_map_y,output_test.feature_names_to_idx['aro_tp_0m']]
+                )
+            if (diff > thresh_on_diff_pred_proba).any():
+                found_i_hat.append(i_hat)
+                found_j_hat.append(j_hat)
+                found_c_hat.append(c_hat)
+                found_diff_v_hat.append(observation_test[0,0,i_hat,j_hat,c_hat].item()-original_input[0,0,i_hat,j_hat,c_hat].item())
+                diff_pred.append(diff)
+
+        # Converter listas para arrays numpy antes de plotar
+        found_i_hat_arr = np.array(found_i_hat)
+        found_j_hat_arr = np.array(found_j_hat)
+        found_c_hat_arr = np.array(found_c_hat)
+        found_diff_v_hat_arr = np.array(found_diff_v_hat)
+        found_diff_pred_arr = np.array([d.cpu().numpy() for d in diff_pred])
+
+        # Plotar apenas se houver pontos encontrados
+        return {'x_map': point_map_x,
+                'y_map': point_map_y,
+                'i_hat': found_i_hat_arr, 
+                'j_hat': found_j_hat_arr, 
+                'c_hat': found_c_hat_arr, 
+                'diff_v_hat': found_diff_v_hat_arr, 
+                'diff_pred': found_diff_pred_arr,
+                'top_k': top_k_points
+                }
+
+    def plot_comparison(self, original, mask, perturbed, channel_names, x_map, y_map, i_hat, j_hat, c_hat):
+        """Mostra comparação lado a lado: original, máscara e perturbado"""
+        fig = plt.figure(figsize=(20, 12))
+        gs = fig.add_gridspec(3, 3, height_ratios=[1, 1, 1])
+        
+        # Linha 1: Cannaux Originais
+        for c in range(3):
+            ax = plt.subplot(3, 3, c+1)
+            if c == 0:
+                img = ax.imshow(original[:, :, c], cmap='Blues', vmin=0, vmax=60)
+                ax.set_title(f'{channel_names[c]} - Original\n(Máx: {original[:,:,c].max():.2f}, Mín: {original[:,:,c].min():.2f})')
+            else:
+                img = ax.imshow(original[:, :, c], cmap='coolwarm', vmin=-20, vmax=20)
+                ax.set_title(f'{channel_names[c]} - Original\n(Máx: {original[:,:,c].max():.2f}, Mín: {original[:,:,c].min():.2f})')
+            ax.scatter(x_map, y_map, c='black', marker='x', s=50, linewidth=2)
+            plt.colorbar(img, ax=ax, shrink=0.8)
+        
+        # Linha 2: Masque
+        ax_mask = fig.add_subplot(gs[1, c_hat])
+        mask_img = ax_mask.imshow(mask.cpu(), cmap='hot')
+        ax_mask.set_title(f'Mask (Center: {i_hat},{j_hat})')
+        ax.scatter(x_map, y_map, c='black', marker='x', s=50, linewidth=2)
+        plt.colorbar(mask_img, ax=ax_mask)
+        
+        # Linha 3: Cannaux Perturbés
+        for c in range(3):
+            ax = plt.subplot(3, 3, c+7)
+            if c == 0:
+                img = ax.imshow(perturbed[:, :, c], cmap='Blues', vmin=0, vmax=60)
+                ax.set_title(f'{channel_names[c]} - Perturbé\n(Máx: {perturbed[:,:,c].max():.2f}, Mín: {perturbed[:,:,c].min():.2f})')
+            else:
+                img = ax.imshow(perturbed[:, :, c], cmap='coolwarm', vmin=-20, vmax=20)
+                ax.set_title(f'{channel_names[c]} - Perturbé\n(Máx: {perturbed[:,:,c].max():.2f}, Mín: {perturbed[:,:,c].min():.2f})')
+            ax.scatter(x_map, y_map, c='black', marker='x', s=50, linewidth=2)
+            plt.colorbar(img, ax=ax, shrink=0.8)
+        
+        plt.tight_layout()
+        plt.show()
+        
+    @torch.enable_grad()
+    def explain_with_grad(self, batch: ItemBatch, batch_idx: int):
+        batch.inputs.tensor.requires_grad_(True)
+        batch.forcing.tensor.requires_grad_(True)
+        
+        with torch.set_grad_enabled(True):
+            # preds, target = self.common_step(batch, batch_idx, phase="train")
+
+            # mask = self.get_mask_on_nan(target)
+
+            # loss = self.loss_gradients(preds, target, mask)
+            preds = self.forward(batch, batch_idx)
+
+            target_value = preds.tensor[0, 0, :, :, preds.feature_names_to_idx['aro_tp_0m']]
+
+            target_value.backward()
+
+        gradient = batch.inputs.tensor.grad.detach().numpy()  # remove a dimensão do batch
+        input_data = batch.inputs.tensor.detach().numpy()[0]
+
+        time_step = 0  # primeiro passo de tempo na entrada
+        static_feature = 0  # primeira feature estática
+
+        plt.figure(figsize=(15,5))
+
+        # Gradiente
+        plt.subplot(1, 3, 1)
+        plt.imshow(gradient[time_step, time_step, :, :, static_feature])
+        plt.colorbar()
+        plt.title("Gradient")
+
+        # Input
+        plt.subplot(1, 3, 2)
+        plt.imshow(input_data[time_step, time_step, :, :, static_feature])
+        plt.colorbar()
+        plt.title("Input")
+
+        # Input * Gradient
+        plt.subplot(1, 3, 3)
+        plt.imshow(input_data[time_step, time_step, :, :, static_feature] * gradient[time_step, time_step, :, :, static_feature])
+        plt.colorbar()
+        plt.title("Input times Gradient")
+
+        plt.tight_layout()
+        plt.show()
+        
         return preds

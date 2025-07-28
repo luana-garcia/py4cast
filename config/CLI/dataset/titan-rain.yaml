@@ -2,7 +2,6 @@ data:
   list_run_hour: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 23] # list of input hours for inference
   save_gifs: true
   save_gribs: false
-  use_old_weights: "logs_experiment/titan/weights_only.pth"
   #args forwarded (linked) to model
   dataset_name: titan_aro_arp
   num_input_steps: 1
@@ -26,8 +25,8 @@ data:
         obs_step: 3600
         obs_step_btw_t0: 3600
       test:
-        start: 20231115
-        end: 20231115
+        start: 20231117
+        end: 20231117
         obs_step: 3600
         obs_step_btw_t0: 3600
     grid:
@@ -39,14 +38,7 @@ data:
     settings:
       standardize: true
       file_format: npy
-      add_landsea_mask: true #add land/sea mask
     params:
-      aro_t2m:
-        levels: [2]
-        kind: input_output
-      aro_r2:
-        levels: [2]
-        kind: input_output
       aro_tp:
         levels: [0]
         kind: input_output
@@ -56,27 +48,3 @@ data:
       aro_v10:
         levels: [10]
         kind: input_output
-      aro_t:
-        levels: [250, 500, 700, 850]
-        kind: input_output
-      aro_u:
-        levels: [250, 500, 700, 850]
-        kind: input_output
-      aro_v:
-        levels: [250, 500, 700, 850]
-        kind: input_output
-      aro_z:
-        levels: [250, 500, 700, 850]
-        kind: input_output
-      arp_t:
-        levels: [250, 500, 700, 850]
-        kind: input
-      arp_u:
-        levels: [250, 500, 700, 850]
-        kind: input
-      arp_v:
-        levels: [250, 500, 700, 850]
-        kind: input
-      arp_z:
-        levels: [250, 500, 700, 850]
-        kind: input

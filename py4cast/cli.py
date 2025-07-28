@@ -54,3 +54,19 @@ class Py4castLightningCLI(LightningCLI):
             "model.infer_ds",
             apply_on="instantiate",
         )
+        parser.add_argument(
+            "--explain_instance",
+            type=dict,
+            default={
+                "explanation_mode": False,
+                "explanation_args": {
+                    "show_perturbations": False,
+                    "num_perturbations": 0
+                }
+            },
+            help="Configures the explanation mode (ex: explanation_mode, num_perturbations)",
+        )
+        parser.link_arguments(
+            "explain_instance",
+            "model.explain_instance"
+        )

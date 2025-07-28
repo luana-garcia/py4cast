@@ -1,6 +1,9 @@
 matplotlibrc
 mf.crt
 
+logs_experiment/
+plots/
+
 #slurm
 slurm-*.out
 

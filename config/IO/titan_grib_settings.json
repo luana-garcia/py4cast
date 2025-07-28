@@ -1,7 +1,7 @@
 {
     "template_grib": "../template/grid.arome-oper.eurw1s40+0001:00.grib",
-    "dir_grib" : "/scratch/shared/py4cast/gribs_writing/todel/",
-    "dir_gif" : "/scratch/shared/py4cast/gifs_dir/todel/",
+    "dir_grib" : "plots/gribs_writing/todel/",
+    "dir_gif" : "plots/gifs_dir/anchors/",
     "path_to_runtime" : "dataset_{}/{}",
     "output_kwargs" : ["titan_1s40"],
     "grib_fmt" : "mb{}/forecast/grid.emul_aro_ai_ech_{}.grib",

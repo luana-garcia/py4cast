@@ -11,7 +11,7 @@ from mfai.pytorch.namedtensor import NamedTensor
 
 from py4cast.datasets.base import DatasetABC
 from py4cast.datasets.titan.settings import METADATA
-from py4cast.utils import make_gif
+from py4cast.utils import make_gif, make_gif_anchors
 
 
 @dataclass_json
@@ -238,6 +238,28 @@ def save_gifs(pred, runtime, grid, save_settings):
             grid.projection,
             grid.grid_limits,
             METADATA,
+        )
+
+        # Save gifs
+        gif_path = save_settings.get_gif_path(runtime, feature_name)
+        gif.save(frames, str(gif_path), duration=500)
+
+def save_gifs_anchors(pred, runtime, grid, save_settings, anchors):
+    for feature_name in pred.feature_names:
+        feature_idx = pred.feature_names_to_idx[feature_name]
+        # Make gif
+        feat = [pred.tensor[:, :, :, feature_idx].cpu()]
+        frames = make_gif_anchors(
+            feature_name,
+            feature_idx,
+            runtime,
+            None,
+            feat,
+            "Py4cast",
+            grid.projection,
+            grid.grid_limits,
+            METADATA,
+            anchors
         )
 
         # Save gifs

@@ -1,0 +1,11 @@
+explain_instance:
+  explanation_mode: True
+  explanation_type: 'anchors'
+  explanation_args:
+    point_map_x: 200
+    point_map_y: 300
+    show_perturbations: False
+    num_perturbations: 200
+    perturbation_radius: 150
+  plot_args:
+    top_k_points: 10

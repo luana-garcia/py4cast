@@ -187,6 +187,132 @@ def plot_frame(
     copyright = "Météo-France, Py4cast project."
     fig.text(0, 0.02, copyright, fontsize=8, ha="left")
 
+@gif.frame
+def plot_frame_anchors(
+    feature_name: str,
+    feature_idx: int,
+    target: np.ndarray,
+    predictions: List[np.ndarray],
+    proj_name: str,
+    subdomain: List[int],
+    metadata: dict[str, Any],
+    title: str = None,
+    models_names: List[str] = None,
+    anchors: dict = None
+) -> None:
+    """Plots one frame of the animation."""
+
+    x_map = anchors['x_map']
+    y_map = anchors['y_map']
+    found_i_hat_arr = anchors['i_hat']
+    found_j_hat_arr = anchors['j_hat']
+    found_c_hat_arr = anchors['c_hat']
+    found_diff_v_hat_arr = anchors['diff_v_hat']
+    found_diff_pred_arr = anchors['diff_pred']
+    k = anchors['top_k']
+
+    nb_preds = len(predictions) + 1 if target is not None else len(predictions)
+    lines = int(math.sqrt(nb_preds))
+    cols = nb_preds // lines
+    if nb_preds % lines != 0:
+        cols += 1
+
+    param = feature_name.split("_")[1]
+    if param in PARAMS_INFO.keys():
+        cmap = PARAMS_INFO[param]["cmap"]
+        vmin = PARAMS_INFO[param]["vmin"]
+        vmax = PARAMS_INFO[param]["vmax"]
+        colorbar_label = PARAMS_INFO[param]["label"]
+    else:
+        cmap = "plasma"
+        vmin, vmax = None, None
+        short_name = "_".join(feature_name.split("_")[:2])
+        feature_str = metadata["WEATHER_PARAMS"][short_name]["long_name"][6:]
+        colorbar_label = (
+            f"{feature_str}"  # Units: ({dataset_info.units[feature_name]})"
+        )
+
+    if (lines, cols) == (1, 3):
+        figsize = (12, 5)
+    elif (lines, cols) == (2, 2):
+        figsize = (4 * cols, 4 * lines)
+    else:
+        figsize = (4 * cols, 5 * lines)
+
+    fig = plt.figure(constrained_layout=True, figsize=figsize, dpi=200)
+    subfig = fig.subfigures(nrows=1, ncols=1)
+    axes = subfig.subplots(
+        nrows=lines, ncols=cols, subplot_kw={"projection": proj_name}
+    )
+    extent = subdomain
+    if isinstance(axes, np.ndarray):
+        pass
+    else:
+        axes = np.array([axes])
+
+    axs = axes.flat
+    data_list = [target] + predictions if target is not None else predictions
+
+    for i, data in enumerate(data_list):
+        axs[i].coastlines()
+        if param == "tp":  # threshold precipitations
+            data = np.where(data < 0.5, np.nan, data)
+
+        im = axs[i].imshow(
+            data,
+            origin="lower",
+            extent=extent,
+            vmin=vmin,
+            vmax=vmax,
+            cmap=cmap,
+        )
+
+        if len(found_i_hat_arr) > 0:
+            indices = np.argsort(np.abs(found_diff_pred_arr))[-k:]
+
+            top_mask = np.zeros_like(found_diff_pred_arr, dtype=bool)
+            top_mask[indices] = True
+
+            x_coords = extent[0] + (extent[1] - extent[0]) * (found_i_hat_arr / data.shape[1])
+            y_coords = extent[2] + (extent[3] - extent[2]) * (found_j_hat_arr / data.shape[0])
+
+            x_map = extent[0] + (extent[1] - extent[0]) * (x_map / data.shape[1])
+            y_map = extent[2] + (extent[3] - extent[2]) * (y_map / data.shape[0])
+            
+            # Valores positivos (aumento)
+            mask_pos = (found_c_hat_arr == feature_idx) & (found_diff_v_hat_arr > 0) & top_mask
+            if np.any(mask_pos):
+                axs[i].scatter(x_coords[mask_pos], y_coords[mask_pos],
+                        c=['r', 'g', 'b'][feature_idx], marker='^', label=f'Canal {feature_name} (+)')
+            
+            # Valores negativos (redução)
+            mask_neg = (found_c_hat_arr == feature_idx) & (found_diff_v_hat_arr <= 0) & top_mask
+            if np.any(mask_neg):
+                axs[i].scatter(x_coords[mask_neg], y_coords[mask_neg],
+                        c=['r', 'g', 'b'][feature_idx], marker='v', label=f'Canal {feature_name} (-)')
+                
+            mask_text = (found_c_hat_arr == feature_idx) & top_mask
+            for x, y, val in zip(x_coords[mask_text], y_coords[mask_text], found_diff_v_hat_arr[mask_text]):
+                axs[i].text(x, y, f'{val:.1f}', 
+                        fontsize=4, ha='left', va='top',
+                        bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=1))
+            
+            axs[i].scatter(x_map, y_map, c='black', marker='x', s=20, linewidth=1)
+            axs[i].legend()
+            
+        # plt.show()
+
+        if models_names:
+            axs[i].set_title(models_names[i], size=15)
+
+    subfig.colorbar(im, ax=axes, location="bottom", label=colorbar_label, aspect=40)
+
+    if title:
+        fig.suptitle(title, size=20)
+
+    copyright = "Météo-France, Py4cast project."
+    fig.text(0, 0.02, copyright, fontsize=8, ha="left")
+
 
 def make_gif(
     feature: str,
@@ -218,6 +344,44 @@ def make_gif(
             metadata,
             title,
             models_names,
+        )
+        frames.append(frame)
+    return frames
+
+def make_gif_anchors(
+    feature: str,
+    feature_idx: int,
+    runtime: str,
+    target: np.ndarray,
+    preds: List[np.ndarray],
+    models_names: List[str],
+    proj_name: str,
+    subdomain: List[int],
+    metadata: dict[str, Any],
+    anchors
+):
+    """Make a gifs comparing multiple forecasts of one feature."""
+
+    frames = []
+    for t in range(preds[0].shape[0]):
+        title = f"{runtime} +{t+1}h"
+        preds_t = [pred[t] for pred in preds]
+        target_t = target[t] if target is not None else None
+        if feature == "aro_t2m_2m":  # Convert to °C
+            if target_t is not None:
+                target_t = target_t - 273.15
+            preds_t = [pred - 273.15 for pred in preds_t]
+        frame = plot_frame_anchors(
+            feature,
+            feature_idx,
+            target_t,
+            preds_t,
+            proj_name,
+            subdomain,
+            metadata,
+            title,
+            models_names,
+            anchors
         )
         frames.append(frame)
     return frames

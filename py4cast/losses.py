@@ -184,3 +184,66 @@ class ScaledLoss(Py4CastLoss):
         return mean_loss * self.weights(
             tuple(prediction.feature_names), prediction.device
         )
+
+class StandardLoss(Py4CastLoss):
+    """
+    Compute a weighted loss function with a weight for each feature.
+    During the forward step, the loss is computed for each feature and then weighted
+    and optionally averaged over the spatial dimensions.
+    """
+
+    def prepare(
+        self,
+        lm: pl.LightningModule,
+        interior_mask: torch.Tensor,
+        dataset_info: DatasetInfo,
+    ) -> None:
+        # build the dictionnary of weight
+        loss_state_weight = {}
+
+        exponent = 2.0 if self.loss.__class__ == MSELoss else 1.0
+
+        for name in dataset_info.state_weights:
+            loss_state_weight[name] = dataset_info.state_weights[name] / (
+                dataset_info.diff_stats[name]["std"] ** exponent
+            )
+        self.register_loss_state_buffers(
+            lm, interior_mask, loss_state_weight, squeeze_mask=True
+        )
+        self.lm = lm
+
+    def forward(
+        self,
+        prediction: NamedTensor,
+        target: NamedTensor,
+        mask: torch.Tensor,
+        reduce_spatial_dim=True,
+    ) -> torch.Tensor:
+        """
+        Computed loss function.
+        prediction/target: (B, pred_steps, N_grid, d_f) or (B, pred_steps, W, H, d_f)
+        returns (B, pred_steps)
+        """
+        # Compute Torch loss (defined in the parent class when this Mixin is used)
+        torch_loss = self.loss(prediction.tensor * mask, target.tensor * mask)
+
+        '''
+        # if no reduction on spatial dimension is required, return the weighted loss
+        if not reduce_spatial_dim:
+            return weighted_loss
+
+        union_mask = torch.any(mask, dim=(0, 1, 4))
+
+        # Compute the mean loss over all spatial dimensions
+        # Take (unweighted) mean over only non-border (interior) grid nodes/pixels
+        # We use forward indexing for the spatial_dim_idx of the target tensor
+        # so the code below works even if the feature dimension has been reduced
+        # The final shape is (B, pred_steps)
+
+        time_step_mean_loss = torch.sum(
+            weighted_loss * self.lm.interior_mask_s,
+            dim=target.spatial_dim_idx,
+        ) / (self.num_interior - (~union_mask).sum())
+        '''
+        
+        return torch_loss
